@@ -1,2 +1,2 @@
 # myrep
-This is my Personal Rep
+This is my Personal Rep contains all the projects.
