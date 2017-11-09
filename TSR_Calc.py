@@ -1,3 +1,4 @@
+#This Python code is to extract data from Excel Sheet using OpenPyXl package in Python 3.6
 import openpyxl as xl
 
 wb=xl.load_workbook("E:\\Harshitha_work\\CEO Remuneration Work\\Additional Work\\Returns Calc\Datastream Collection Entire Dataset 170911.xlsx")
