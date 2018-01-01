@@ -1,0 +1,1499 @@
+NOTE: Copyright (c) 2002-2012 by SAS Institute Inc., Cary, NC, USA.
+NOTE: SAS (r) Proprietary Software 9.4 (TS1M3)
+      Licensed to UNIVERSITY OF SOUTHERN CALIFORNIA-SFA-T&R, Site 70106144.
+NOTE: This session is executing on the X64_7PRO  platform.
+
+
+
+NOTE: Updated analytical products:
+
+      SAS/STAT 14.1
+
+NOTE: Additional host information:
+
+ X64_7PRO WIN 6.1.7601 Service Pack 1 Workstation
+
+NOTE: SAS initialization used:
+      real time           0.86 seconds
+      cpu time            0.68 seconds
+
+NOTE: Unable to open SASUSER.PROFILE. WORK.PROFILE will be opened instead.
+NOTE: All profile changes will be lost at the end of the session.
+1    libname es 'F:\Coding\Macros';
+NOTE: Libref ES was successfully assigned as follows:
+      Engine:        V9
+      Physical Name: F:\Coding\Macros
+2    /* Macro IBES_SAMPLE extracts the estimates from the IBES Unadjusted file based on         */
+3    /* the user-provided input, links them to actuals, puts estimates and actuals on the       */
+4    /* same basis by adjusting for stock splits using CRSP adjustment factor and calculates    */
+5    /* the median of analyst forecasts made in the 90 days prior to the earnings announcement  */
+6    /* date.                                                                                   */
+7    /*******************************************************************************************/
+8    /*Select the last estimate for a firm within broker-analyst group*/
+9    proc sql;
+9  !           create table ibes (drop=measure fpi)
+10           as select *
+11           from es.ibes
+12           order by ticker, fpedats, estimator, analys, anndats, revdats;
+NOTE: Table WORK.IBES created, with 6229016 rows and 16 columns.
+
+13   quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           5.55 seconds
+      cpu time            5.30 seconds
+
+
+14
+15    data ibes; set ibes;
+16           by ticker fpedats estimator analys;
+17           if last.analys;
+18   run;
+
+NOTE: There were 6229016 observations read from the data set WORK.IBES.
+NOTE: The data set WORK.IBES has 3164369 observations and 16 variables.
+NOTE: DATA statement used (Total process time):
+      real time           1.15 seconds
+      cpu time            1.12 seconds
+
+
+19   /*How many estimates are reported on primary/diluted basis?*/
+20   proc sql;
+21           create table ibes
+22                   as select a.*, sum(pdf='P') as p_count, sum(pdf='D') as d_count
+23                   from ibes as a
+24                   group by ticker, fpedats;
+NOTE: The query requires remerging summary statistics back with the original data.
+WARNING: This CREATE TABLE statement recursively references the target table. A consequence of
+         this is a possible data integrity problem.
+NOTE: Table WORK.IBES created, with 3164369 rows and 18 columns.
+
+25   %let ibes2_where=where=(missing(repdats)=0 and missing(anndats)=0 and
+25 ! 0<intck('day',anndats,repdats)<=90);
+26
+27   /* a. Link unadjusted estimates with unadjusted actuals and CRSP permnos
+27 !            */
+28   /* b. Adjust report and estimate dates to be CRSP trading days
+28 !            */
+29           create table ibes1 (&ibes2_where)
+30                   as select a.*, b.anndats as repdats, b.value as act, c.permno,
+31                   case when weekday(a.anndats)=1 then intnx('day',a.anndats,-2)
+31 !   /*if sunday move back by 2 days;*/
+32                        when weekday(a.anndats)=7 then intnx('day',a.anndats,-1) else a.anndats
+32 !   /*if saturday move back by 1 day*/
+33                   end as estdats1,
+34                   case when weekday(b.anndats)=1 then intnx('day',b.anndats,1)
+34 !  /*if sunday move forward by 1 day  */
+35                        when weekday(b.anndats)=7 then intnx('day',b.anndats,2) else b.anndats
+35 !  /*if saturday move forward by 2 days*/
+36                  end as repdats1
+37                   from ibes as a, es.ibes_actu as b, es.iclink as c
+38                   where a.ticker=b.ticker and a.fpedats=b.pends and a.usfirm=b.usfirm and
+38 ! b.pdicity='QTR'
+39                             and b.measure='EPS' and a.ticker=c.ticker and c.score in (0,1,2);
+NOTE: Table WORK.IBES1 created, with 2157951 rows and 23 columns.
+
+40
+41   /*   Making sure that estimates and actuals are on the same basis */
+42   /*   1. retrieve CRSP cumulative adjustment factor for IBES report and estimate dates */
+43           create table adjfactor
+44                   as select distinct a.*
+45                   from es.crsp (keep=permno date cfacshr) as a, ibes1 as b
+46                   where a.permno=b.permno and (a.date=b.estdats1 or a.date=b.repdats1);
+NOTE: Table WORK.ADJFACTOR created, with 1777887 rows and 3 columns.
+
+47
+48   /*      2.if adjustment factors are not the same, adjust the estimate to be on the same basis
+48 !  with the actual   */
+49           create table ibes1
+50                   as select distinct a.*, b.est_factor, c.rep_factor,
+51                           case when (b.est_factor ne c.rep_factor) and missing(b.est_factor)=0
+51 ! and missing(c.rep_factor)=0
+52                            then (rep_factor/est_factor)*value else value end as new_value
+53                   from ibes1 as a,
+54                           adjfactor (rename=(cfacshr=est_factor)) as b,
+55                           adjfactor (rename=(cfacshr=rep_factor)) as c
+56                           where (a.permno=b.permno and a.estdats1=b.date) and
+57                                     (a.permno=c.permno and a.repdats1=c.date);
+WARNING: This CREATE TABLE statement recursively references the target table. A consequence of
+         this is a possible data integrity problem.
+NOTE: Table WORK.IBES1 created, with 1969709 rows and 26 columns.
+
+58   quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           7:00.13
+      cpu time            6:05.08
+
+
+59
+60   /* Make sure the last observation per analyst is included
+61                           */
+62   proc sort data=ibes1;
+63           by ticker fpedats estimator analys anndats revdats;
+64   run;
+
+NOTE: There were 1969709 observations read from the data set WORK.IBES1.
+NOTE: The data set WORK.IBES1 has 1969709 observations and 26 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.59 seconds
+      cpu time            1.21 seconds
+
+
+65
+66   data ibes1; set ibes1;
+67   by ticker fpedats estimator analys;
+68   if last.analys;
+69   run;
+
+NOTE: There were 1969709 observations read from the data set WORK.IBES1.
+NOTE: The data set WORK.IBES1 has 1954646 observations and 26 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.60 seconds
+      cpu time            0.51 seconds
+
+
+70
+71   /* Compute the median forecast based on estimates in the 90 days prior to the report
+71 ! date/PROC MEANS with a NOPRINT option is the same as using PROC SUMMARY */
+72   proc means data=ibes1 noprint;
+73           by ticker fpedats;
+74           var /*value*/ new_value;                         /* new_value is the estimate
+74 ! appropriately adjusted         */
+75           output out= medest (drop=_type_ _freq_)         /* to be on the same basis with the
+75 ! actual reported earnings */
+76           median=medest n=numest;
+77   run;
+
+NOTE: There were 1954646 observations read from the data set WORK.IBES1.
+NOTE: The data set WORK.MEDEST has 387771 observations and 4 variables.
+NOTE: PROCEDURE MEANS used (Total process time):
+      real time           1.06 seconds
+      cpu time            1.06 seconds
+
+
+78
+79   /* Merge median estimates with ancillary information on permno, actuals and report dates
+79 !                          */
+80   /* Determine whether most analysts are reporting estimates on primary or diluted basis
+80 !                          */
+81   /* following the methodology outlined in Livnat and Mendenhall (2006)
+81 !                          */
+82   proc sql;
+82 !           create table medest
+83           as select distinct a.*, b.repdats, b.act, b.permno,
+84           case when p_count>d_count then 'P'
+85                when p_count<=d_count then 'D'
+86           end as basis
+87           from medest as a left join ibes1 as b
+88           on a.ticker=b.ticker and a.fpedats=b.fpedats;
+NOTE: A CASE expression has no ELSE clause. Cases not accounted for by the WHEN clauses will
+      result in a missing value for the CASE expression.
+WARNING: This CREATE TABLE statement recursively references the target table. A consequence of
+         this is a possible data integrity problem.
+NOTE: Table WORK.MEDEST created, with 387783 rows and 8 columns.
+
+89   quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           1.27 seconds
+      cpu time            2.13 seconds
+
+
+90
+91   proc sql;
+92           drop table ibes, ibes1;
+NOTE: Table WORK.IBES has been dropped.
+NOTE: Table WORK.IBES1 has been dropped.
+93   quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.04 seconds
+      cpu time            0.04 seconds
+
+
+94
+95   *COMPUSTAT EXTRACT;
+96   *Create calendar date of fiscal period end in Compustat extract;
+97   proc sql;
+98   create table comp as select *, cshoq*prccq as mcap
+99   from es.comp;
+NOTE: Table WORK.COMP created, with 991376 rows and 37 columns.
+
+99 !               quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           1.89 seconds
+      cpu time            0.42 seconds
+
+
+100  data comp; set comp;
+101     if (1<=fyr<=5) then date_fyend=intnx('month',mdy(fyr,1,fyearq+1),0,'end');
+102     else if (6<=fyr<=12) then date_fyend=intnx('month',mdy(fyr,1,fyearq),0,'end');
+103     fqenddt=intnx('month',date_fyend,-3*(4-fqtr),'end');
+104     format fqenddt date9.;
+105     drop date_fyend;
+106  run;
+
+NOTE: There were 991376 observations read from the data set WORK.COMP.
+NOTE: The data set WORK.COMP has 991376 observations and 38 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.90 seconds
+      cpu time            0.87 seconds
+
+
+107
+108  /* Create a linking table  between IBES ticker and Compustat GVKEY */
+109  /* based on IBES ticker-CRSP permno (ICLINK) and CCM CRSP permno - Compustat GVKEY (CSTLINK2)
+109!  link  */
+110  %let begindate='01jan1980'd; * start calendar date of fiscal period end;
+111  %let enddate='31dec2017'd; * end calendar date of fiscal period end;
+112
+113  proc sort data=es.lnkhist out=lnk;
+114          where linktype in ("LU", "LC" /*,"LD", "LF", "LN", "LO", "LS", "LX"*/)  and
+115          (year(&enddate)+1>=year(linkdt) or linkdt=.B) and
+116          (year(&begindate)-1<=year(linkenddt) or linkenddt=.E);
+117          by gvkey linkdt;
+118  run;
+
+NOTE: There were 26565 observations read from the data set ES.LNKHIST.
+      WHERE linktype in ('LC', 'LU') and ((2018>=YEAR(linkdt)) or (linkdt=.B)) and
+      ((1979<=YEAR(linkenddt)) or (linkenddt=.E));
+NOTE: The data set WORK.LNK has 26565 observations and 8 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.04 seconds
+      cpu time            0.03 seconds
+
+
+119
+120  /*Creating GVKEY-TICKER link for CRSP firms, call it CIBESLNK*/
+121  proc sql;
+121!           create table lnk1 (drop=permno score where=(missing(ticker)=0))
+122          as select *
+123          from lnk (keep=gvkey lpermno lpermco linkdt linkenddt) as a left join
+124          es.iclink (keep=ticker permno score where=(score in (0,1,2))) as b
+125          on a.lpermno=b.permno;
+NOTE: Table WORK.LNK1 created, with 19322 rows and 6 columns.
+
+126  quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.04 seconds
+      cpu time            0.04 seconds
+
+
+127  proc sort data=lnk1;
+128          by gvkey ticker linkdt;
+129  run;
+
+NOTE: There were 19322 observations read from the data set WORK.LNK1.
+NOTE: The data set WORK.LNK1 has 19322 observations and 6 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.00 seconds
+
+
+130  data fdate ldate; set lnk1;
+131          by gvkey ticker;
+132          if first.ticker then output fdate;
+133          if last.ticker then output ldate;
+134  run;
+
+NOTE: There were 19322 observations read from the data set WORK.LNK1.
+NOTE: The data set WORK.FDATE has 17747 observations and 6 variables.
+NOTE: The data set WORK.LDATE has 17747 observations and 6 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+135  data temp;      merge
+136                  fdate (keep=gvkey ticker linkdt rename=(linkdt=fdate))
+137                  ldate (keep=gvkey ticker linkenddt rename=(linkenddt=ldate));
+138          by gvkey ticker;
+139  run;
+
+NOTE: There were 17747 observations read from the data set WORK.FDATE.
+NOTE: There were 17747 observations read from the data set WORK.LDATE.
+NOTE: The data set WORK.TEMP has 17747 observations and 4 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.02 seconds
+      cpu time            0.01 seconds
+
+
+140  /*Check for duplicates*/
+141  data dups nodups; set temp;
+142          by gvkey ticker;
+143          if first.gvkey=0 or last.gvkey=0 then output dups;
+144          if not (first.gvkey=0 or last.gvkey=0) then output nodups;
+145  run;
+
+NOTE: There were 17747 observations read from the data set WORK.TEMP.
+NOTE: The data set WORK.DUPS has 914 observations and 4 variables.
+NOTE: The data set WORK.NODUPS has 16833 observations and 4 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.02 seconds
+      cpu time            0.01 seconds
+
+
+146
+147  proc sort data=dups;
+148          by gvkey fdate ldate ticker;
+149  run;
+
+NOTE: There were 914 observations read from the data set WORK.DUPS.
+NOTE: The data set WORK.DUPS has 914 observations and 4 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.00 seconds
+      cpu time            0.00 seconds
+
+
+150
+151  data dups (where=(flag ne 1));
+152          set dups;
+153          by gvkey;
+154          if first.gvkey=0 and (fdate<=lag(ldate) or lag(ldate)=.E) then flag=1;
+155  run;
+
+NOTE: There were 914 observations read from the data set WORK.DUPS.
+NOTE: The data set WORK.DUPS has 707 observations and 5 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+156  data cibeslnk;
+157          set nodups dups (drop=flag);
+158  run;
+
+NOTE: There were 16833 observations read from the data set WORK.NODUPS.
+NOTE: There were 707 observations read from the data set WORK.DUPS.
+NOTE: The data set WORK.CIBESLNK has 17540 observations and 4 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+159
+160  proc sql;
+160!           drop table nodups, dups, fdate, ldate, lnk1;
+NOTE: Table WORK.NODUPS has been dropped.
+NOTE: Table WORK.DUPS has been dropped.
+NOTE: Table WORK.FDATE has been dropped.
+NOTE: Table WORK.LDATE has been dropped.
+NOTE: Table WORK.LNK1 has been dropped.
+160!                                                       quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.00 seconds
+      cpu time            0.00 seconds
+
+
+161  * a) Link Gvkey with Lpermno;
+162  proc sql;
+163     create table comp1
+164     as select a.*, b.lpermno
+165     from comp (where=(&begindate<=fqenddt<=&enddate)) as a left join lnk as b
+166     on a.gvkey=b.gvkey and ((b.linkdt<=a.fqenddt <=b.linkenddt) or
+167     (b.linkdt<=a.fqenddt and b.linkenddt=.E) or
+168     (b.linkdt=.B and a.fqenddt <=b.linkenddt));
+WARNING: Variable LPERMNO already exists on file WORK.COMP1.
+NOTE: Table WORK.COMP1 created, with 1009942 rows and 38 columns.
+
+169
+170  * b) Link Gvkey with IBES Ticker;
+171  create table comp1
+172     as select a.*, b.ticker
+173     from comp1 as a left join cibeslnk as b
+174     on a.gvkey=b.gvkey and ((b.fdate<=a.fqenddt <=b.ldate) or
+175     (b.fdate<=a.fqenddt and b.ldate=.E) or (b.fdate=.B and a.fqenddt <=b.ldate));
+WARNING: This CREATE TABLE statement recursively references the target table. A consequence of
+         this is a possible data integrity problem.
+NOTE: Table WORK.COMP1 created, with 1009942 rows and 39 columns.
+
+176
+177   /* c) Link IBES analysts' expectations (MEDEST), IBES report dates (repdats)
+178  * and actuals (act) with Compustat data; */
+179  create table comp1
+180     as select a.*, b.medest, b.numest,b.repdats, b.act, b.basis
+181     from comp1 as a left join medest as b
+182     on a.ticker=b.ticker and
+183     year(a.fqenddt)*100+month(a.fqenddt)=year(b.fpedats)*100+month(b.fpedats);
+WARNING: This CREATE TABLE statement recursively references the target table. A consequence of
+         this is a possible data integrity problem.
+NOTE: Table WORK.COMP1 created, with 1009976 rows and 44 columns.
+
+184  quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           3.16 seconds
+      cpu time            3.76 seconds
+
+
+185
+186  *remove fully duplicate records and pre-sort;
+187  proc sort data=comp1 noduprec; by _all_;run;
+
+NOTE: There were 1009976 observations read from the data set WORK.COMP1.
+NOTE: 18600 duplicate observations were deleted.
+NOTE: The data set WORK.COMP1 has 991376 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.82 seconds
+      cpu time            1.71 seconds
+
+
+188  proc sort data=comp1; by gvkey fyearq fqtr;run;
+
+NOTE: There were 991376 observations read from the data set WORK.COMP1.
+NOTE: The data set WORK.COMP1 has 991376 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.83 seconds
+      cpu time            0.96 seconds
+
+
+189
+190  /* Description: 3 Methods of calculating standardized earnings surprises
+190!   */
+191  /*
+191!   */
+192  /* Macro SUE calculates standardized earnings surprises using 3 (three) methods considered
+192!   */
+193  /* by LM (2006). Method 1 assumes a rolling seasonal random walk model. Method 2 excludes
+193!   */
+194  /* "special items" from the Compustat Data. In these two methods, if most analyst forecasts
+194! of */
+195  /* EPS are based on diluted (primary) EPS, Macro uses Compustat's diluted (basic) figures
+195!   */
+196  /* Method 3 is based solely on IBES median estimates/actuals and does not use Compustat data
+196!   */
+197  /********************************************************************************************
+197! ***/
+198
+199  %MACRO SUE (method=, input=);
+200  /* Process Compustat Data on a seasonal year-quarter basis*/
+201  %local i;
+202  %do i=1 %to 4;
+203  proc sort data=comp1 (where=(fqtr=&i)) out=qtr;
+204      by gvkey fyearq fqtr;
+205  run;
+206
+207  data qtr; set qtr;
+208      by gvkey fyearq;
+209      %if &method=1 %then
+210       %do;
+211          lageps_p=lag(epspxq);lageps_d=lag(epsfxq);lagadj=lag(ajexq);
+212          if first.gvkey then do; lageps_p=.;lageps_d=.;lagadj=.;end;
+213          select (basis);
+214          when ('P') do; actual=epspxq/ajexq; expected=lageps_p/lagadj;end;
+215          when ('D') do; actual=epsfxq/ajexq; expected=lageps_d/lagadj;end;
+216          otherwise do; actual=epspxq/ajexq; expected=lageps_p/lagadj;end;
+217          end;
+218          drop lageps_p lageps_d lagadj;
+219          deflator=prccq/ajexq;
+220      %end;%else;
+221      %if &method=2 %then
+222       %do;
+223          lageps_p=lag(epspxq);lagshr_p=lag(cshprq);lagadj=lag(ajexq);
+224          lageps_d=lag(epsfxq);lagshr_d=lag(cshfdq);lagspiq=lag(spiq);
+225          if first.gvkey then do; lageps_p=.;lageps_d=.;lagshr_p=.;
+226                                  lagshr_d=.;lagadj=.;lagspiq=.;end;
+227          select (basis);
+228          when ('P') do; actual=sum(epspxq,-0.65*spiq/cshprq)/ajexq;
+228! expected=sum(lageps_p,-0.65*lagspiq/lagshr_p)/lagadj;end;
+229          when ('D') do; actual=sum(epsfxq,-0.65*spiq/cshfdq)/ajexq;
+229! expected=sum(lageps_d,-0.65*lagspiq/lagshr_d)/lagadj;end;
+230          otherwise do; actual=sum(epspxq,-0.65*spiq/cshprq)/ajexq;
+230! expected=sum(lageps_p,-0.65*lagspiq/lagshr_p)/lagadj;end;
+231          end;
+232          drop lageps_p lagshr_p lagadj lageps_d lagshr_d lagspiq;
+233          deflator=prccq/ajexq;
+234          %end;%else;
+235      %if &method=3 %then
+236       %do;
+237          actual=act;
+238          expected=medest;
+239          deflator=prccq;
+240       %end;
+241      sue&method=(actual-expected)/deflator;
+242      format sue&method percent7.4;
+243  run;
+244
+245  proc append base=comp_final&method data=qtr;run;
+246  proc sql; drop table qtr;quit;
+247  %end;
+248
+249  proc sort data=comp_final&method; by gvkey fyearq fqtr;run;
+250  %MEND;
+251
+252  * Macro SUE calculates standardized earnings surprises SUE1, SUE2, SUE3
+253  * and outputs datasets comp_final&k into the work directory;
+254  %MACRO Allsurprises;
+255     %do k=1 %to 3;
+256     %SUE (method=&k, input=comp1);
+257     %end;
+258  %mend;
+259  %Allsurprises;
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 247259 observations read from the data set WORK.COMP1.
+      WHERE fqtr=1;
+NOTE: The data set WORK.QTR has 247259 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.29 seconds
+      cpu time            0.20 seconds
+
+
+
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      351 at 3:199     2446 at 3:224    555 at 4:19      4848 at 4:44     34728 at 4:92
+      49435 at 4:117   11413 at 4:204   58105 at 6:24    716 at 6:34
+NOTE: There were 247259 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 247259 observations and 48 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.14 seconds
+      cpu time            0.14 seconds
+
+
+NOTE: Writing HTML Body file: sashtml.htm
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL1.
+NOTE: BASE data set does not exist. DATA file is being copied to BASE file.
+NOTE: There were 247259 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.COMP_FINAL1 has 247259 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.54 seconds
+      cpu time            0.34 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 248265 observations read from the data set WORK.COMP1.
+      WHERE fqtr=2;
+NOTE: The data set WORK.QTR has 248265 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.20 seconds
+      cpu time            0.20 seconds
+
+
+
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      353 at 10:199     2464 at 10:224    386 at 11:19      4507 at 11:44     32521 at 11:92
+      47676 at 11:117   12275 at 11:204   55525 at 13:24    726 at 13:34
+NOTE: There were 248265 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 248265 observations and 48 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.14 seconds
+      cpu time            0.14 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL1.
+NOTE: There were 248265 observations read from the data set WORK.QTR.
+NOTE: 248265 observations added.
+NOTE: The data set WORK.COMP_FINAL1 has 495524 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.09 seconds
+      cpu time            0.07 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 248568 observations read from the data set WORK.COMP1.
+      WHERE fqtr=3;
+NOTE: The data set WORK.QTR has 248568 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.20 seconds
+      cpu time            0.20 seconds
+
+
+
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      447 at 17:199     2676 at 17:224    497 at 18:19      4584 at 18:44     35799 at 18:92
+      50583 at 18:117   12761 at 18:204   58960 at 20:24    681 at 20:34
+NOTE: There were 248568 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 248568 observations and 48 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.14 seconds
+      cpu time            0.14 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL1.
+NOTE: There were 248568 observations read from the data set WORK.QTR.
+NOTE: 248568 observations added.
+NOTE: The data set WORK.COMP_FINAL1 has 744092 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.08 seconds
+      cpu time            0.09 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 247284 observations read from the data set WORK.COMP1.
+      WHERE fqtr=4;
+NOTE: The data set WORK.QTR has 247284 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.19 seconds
+      cpu time            0.18 seconds
+
+
+
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      270 at 24:199     2503 at 24:224    356 at 25:19      3707 at 25:44     31716 at 25:92
+      47659 at 25:117   13150 at 25:204   54653 at 27:24    752 at 27:34
+NOTE: There were 247284 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 247284 observations and 48 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.13 seconds
+      cpu time            0.14 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL1.
+NOTE: There were 247284 observations read from the data set WORK.QTR.
+NOTE: 247284 observations added.
+NOTE: The data set WORK.COMP_FINAL1 has 991376 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.08 seconds
+      cpu time            0.09 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: There were 991376 observations read from the data set WORK.COMP_FINAL1.
+NOTE: The data set WORK.COMP_FINAL1 has 991376 observations and 48 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.61 seconds
+      cpu time            0.98 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 247259 observations read from the data set WORK.COMP1.
+      WHERE fqtr=1;
+NOTE: The data set WORK.QTR has 247259 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.30 seconds
+      cpu time            0.21 seconds
+
+
+
+NOTE: Division by zero detected at line 5 column 97.
+GVKEY=010791 DATADATE=19960930 FYEARQ=1997 FQTR=1 CONML=Bulova Technologies Group Inc SIC=4213
+LIID=01 LINKDT=19810130 LINKENDDT=19970730 LINKPRIM=P LINKTYPE=LU LPERMCO=4619 LPERMNO=77703
+CONM=BULOVA TECHNOLOGIES GP INC EXCHG=19 FYR=6 AJEXQ=0.0003 DATAFQTR=1997Q1 RDQ=. ATQ=2.7440
+CSHFDQ=. CSHOQ=10.9150 CSHPRQ=0.0000 EPSFXQ=-55.3300 EPSPXQ=-55.3300 IBQ=-0.0170 SALEQ=4.3680
+SPIQ=0.0000 PRCCQ=0.1870 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1996Q3 CURCDQ=USD
+COSTAT=A mcap=2.0411047817 fqenddt=30SEP1996 TICKER=  medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=0 LAST.GVKEY=1 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=0 lagshr_p=10.795
+lagadj=0.00033333 lageps_d=0 lagshr_d=. lagspiq=0 actual=-165991.6599 expected=0
+deflator=561.00555006 sue2=( 3E4%) _ERROR_=1 _N_=85856
+NOTE: Division by zero detected at line 5 column 97.
+GVKEY=063977 DATADATE=19991130 FYEARQ=2000 FQTR=1 CONML=Return Assured Inc SIC=3571 LIID=01
+LINKDT=19961113 LINKENDDT=20010802 LINKPRIM=C LINKTYPE=LC LPERMCO=15143 LPERMNO=84218
+CONM=RETURN ASSURED INC EXCHG=19 FYR=8 AJEXQ=1.0000 DATAFQTR=2000Q1 RDQ=20000107 ATQ=5.8690
+CSHFDQ=0.0000 CSHOQ=2.1290 CSHPRQ=0.0000 EPSFXQ=0.0000 EPSPXQ=0.0000 IBQ=-0.0670 SALEQ=0.0000
+SPIQ=0.0000 PRCCQ=2.7500 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1999Q4 CURCDQ=USD
+COSTAT=I mcap=5.85475 fqenddt=30NOV1999 TICKER=  medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=0 LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=-0.07 lagshr_p=1.075 lagadj=2
+lageps_d=-0.07 lagshr_d=1.075 lagspiq=0 actual=0 expected=-0.035 deflator=2.75 sue2=1.27%
+_ERROR_=1 _N_=192225
+NOTE: Division by zero detected at line 5 column 148.
+GVKEY=063977 DATADATE=20001130 FYEARQ=2001 FQTR=1 CONML=Return Assured Inc SIC=3571 LIID=01
+LINKDT=19961113 LINKENDDT=20010802 LINKPRIM=C LINKTYPE=LC LPERMCO=15143 LPERMNO=84218
+CONM=RETURN ASSURED INC EXCHG=19 FYR=8 AJEXQ=1.0000 DATAFQTR=2001Q1 RDQ=20010119 ATQ=10.1790
+CSHFDQ=5.9280 CSHOQ=7.1840 CSHPRQ=5.9280 EPSFXQ=-0.3600 EPSPXQ=-0.3600 IBQ=-1.4910 SALEQ=0.0300
+SPIQ=0.0000 PRCCQ=1.0000 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=2000Q4 CURCDQ=USD
+COSTAT=I mcap=7.184 fqenddt=30NOV2000 TICKER=  medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=0 LAST.GVKEY=1 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=0 lagshr_p=0 lagadj=1 lageps_d=0
+lagshr_d=0 lagspiq=0 actual=-0.36 expected=0 deflator=1 sue2=(36.0%) _ERROR_=1 _N_=192226
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      349 at 4:80      2211 at 4:96     2219 at 4:101    349 at 4:109     2444 at 4:126
+      4504 at 4:144    4511 at 4:152    2444 at 4:162    542 at 4:205     1583 at 4:221
+      7133 at 4:226    542 at 4:234     4835 at 4:251    5842 at 5:16     13538 at 5:24
+      4835 at 5:34     34676 at 5:76    42886 at 5:92    43112 at 5:97    34676 at 5:105
+      49391 at 5:122   56719 at 5:140   56885 at 5:148   49391 at 5:158   11413 at 7:24
+      58023 at 9:24    718 at 9:34
+NOTE: Mathematical operations could not be performed at the following places. The results of the
+      operations have been set to missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      2 at 5:97    1 at 5:148
+NOTE: There were 247259 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 247259 observations and 48 variables.
+NOTE: At least one W.D format was too small for the number to be printed. The decimal may be
+      shifted by the "BEST" format.
+NOTE: DATA statement used (Total process time):
+      real time           0.19 seconds
+      cpu time            0.18 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL2.
+NOTE: BASE data set does not exist. DATA file is being copied to BASE file.
+NOTE: There were 247259 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.COMP_FINAL2 has 247259 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.08 seconds
+      cpu time            0.09 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 248265 observations read from the data set WORK.COMP1.
+      WHERE fqtr=2;
+NOTE: The data set WORK.QTR has 248265 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.29 seconds
+      cpu time            0.20 seconds
+
+
+
+NOTE: Division by zero detected at line 15 column 97.
+GVKEY=010791 DATADATE=19961231 FYEARQ=1997 FQTR=2 CONML=Bulova Technologies Group Inc SIC=4213
+LIID=01 LINKDT=19810130 LINKENDDT=19970730 LINKPRIM=P LINKTYPE=LU LPERMCO=4619 LPERMNO=77703
+CONM=BULOVA TECHNOLOGIES GP INC EXCHG=19 FYR=6 AJEXQ=0.0003 DATAFQTR=1997Q2 RDQ=. ATQ=2.7310
+CSHFDQ=. CSHOQ=10.9150 CSHPRQ=0.0000 EPSFXQ=-656.9300 EPSPXQ=-656.9300 IBQ=-0.1970 SALEQ=5.9180
+SPIQ=0.0000 PRCCQ=0.2190 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1996Q4 CURCDQ=USD
+COSTAT=A mcap=2.3903847817 fqenddt=31DEC1996 TICKER=  medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=0 LAST.GVKEY=1 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=0 lagshr_p=10.836
+lagadj=0.00033333 lageps_d=0 lagshr_d=. lagspiq=0 actual=-1970809.708 expected=0
+deflator=657.00651007 sue2=( 3E5%) _ERROR_=1 _N_=85372
+NOTE: Division by zero detected at line 15 column 97.
+GVKEY=029468 DATADATE=19940131 FYEARQ=1994 FQTR=2 CONML=Lakeview Financial Corp SIC=6036 LIID=01
+LINKDT=19931222 LINKENDDT=19990528 LINKPRIM=C LINKTYPE=LU LPERMCO=12719 LPERMNO=79990
+CONM=LAKEVIEW FINANCIAL CORP EXCHG=14 FYR=7 AJEXQ=2.6620 DATAFQTR=1994Q2 RDQ=. ATQ=237.4590
+CSHFDQ=0.0000 CSHOQ=2.4200 CSHPRQ=0.0000 EPSFXQ=. EPSPXQ=. IBQ=0.7920 SALEQ=4.6210 SPIQ=0.0000
+PRCCQ=12.7500 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1993Q4 CURCDQ=USD COSTAT=I
+mcap=30.854990344 fqenddt=31JAN1994 TICKER=LVSB medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=1 LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=. lagshr_p=. lagadj=. lageps_d=.
+lagshr_d=. lagspiq=. actual=. expected=. deflator=4.7896377698 sue2=. _ERROR_=1 _N_=170447
+NOTE: Division by zero detected at line 15 column 148.
+GVKEY=029468 DATADATE=19950131 FYEARQ=1995 FQTR=2 CONML=Lakeview Financial Corp SIC=6036 LIID=01
+LINKDT=19931222 LINKENDDT=19990528 LINKPRIM=C LINKTYPE=LU LPERMCO=12719 LPERMNO=79990
+CONM=LAKEVIEW FINANCIAL CORP EXCHG=14 FYR=7 AJEXQ=2.4200 DATAFQTR=1995Q2 RDQ=. ATQ=415.8590
+CSHFDQ=. CSHOQ=2.6620 CSHPRQ=2.4550 EPSFXQ=0.4500 EPSPXQ=0.4500 IBQ=1.1100 SALEQ=7.8520
+SPIQ=0.0000 PRCCQ=14.2500 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1994Q4 CURCDQ=USD
+COSTAT=I mcap=37.933492493 fqenddt=31JAN1995 TICKER=LVSB medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=0 LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=. lagshr_p=0 lagadj=2.66199588
+lageps_d=. lagshr_d=0 lagspiq=0 actual=0.1859506047 expected=. deflator=5.8884346491 sue2=.
+_ERROR_=1 _N_=170448
+NOTE: Division by zero detected at line 15 column 97.
+GVKEY=031663 DATADATE=19950331 FYEARQ=1995 FQTR=2 CONML=Home Bancorp SIC=6035 LIID=01
+LINKDT=19950330 LINKENDDT=20001031 LINKPRIM=P LINKTYPE=LU LPERMCO=13637 LPERMNO=81490
+CONM=HOME BANCORP EXCHG=14 FYR=9 AJEXQ=1.0000 DATAFQTR=1995Q2 RDQ=. ATQ=306.1590 CSHFDQ=0.0000
+CSHOQ=3.3030 CSHPRQ=0.0000 EPSFXQ=. EPSPXQ=. IBQ=0.5980 SALEQ=5.1720 SPIQ=0.0000 PRCCQ=12.6300
+CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1995Q1 CURCDQ=USD COSTAT=I mcap=41.716887225
+fqenddt=31MAR1995 TICKER=HBFW medest=. numest=. repdats=. act=. basis=  FIRST.GVKEY=1 LAST.GVKEY=0
+FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=. lagshr_p=. lagadj=. lageps_d=. lagshr_d=. lagspiq=.
+actual=. expected=. deflator=12.62999916 sue2=. _ERROR_=1 _N_=179354
+NOTE: Division by zero detected at line 15 column 148.
+GVKEY=031663 DATADATE=19960331 FYEARQ=1996 FQTR=2 CONML=Home Bancorp SIC=6035 LIID=01
+LINKDT=19950330 LINKENDDT=20001031 LINKPRIM=P LINKTYPE=LU LPERMCO=13637 LPERMNO=81490
+CONM=HOME BANCORP EXCHG=14 FYR=9 AJEXQ=1.0000 DATAFQTR=1996Q2 RDQ=19960531 ATQ=312.7580 CSHFDQ=.
+CSHOQ=3.0950 CSHPRQ=2.9670 EPSFXQ=0.2200 EPSPXQ=0.2200 IBQ=0.6650 SALEQ=5.7130 SPIQ=0.0000
+PRCCQ=14.5000 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1996Q1 CURCDQ=USD COSTAT=I
+mcap=44.8775 fqenddt=31MAR1996 TICKER=HBFW medest=. numest=. repdats=. act=. basis=  FIRST.GVKEY=0
+LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=. lagshr_p=0 lagadj=1 lageps_d=. lagshr_d=0
+lagspiq=0 actual=0.22 expected=. deflator=14.5 sue2=. _ERROR_=1 _N_=179355
+NOTE: Division by zero detected at line 15 column 97.
+GVKEY=063977 DATADATE=20000229 FYEARQ=2000 FQTR=2 CONML=Return Assured Inc SIC=3571 LIID=01
+LINKDT=19961113 LINKENDDT=20010802 LINKPRIM=C LINKTYPE=LC LPERMCO=15143 LPERMNO=84218
+CONM=RETURN ASSURED INC EXCHG=19 FYR=8 AJEXQ=1.0000 DATAFQTR=2000Q2 RDQ=20000414 ATQ=5.3520
+CSHFDQ=0.0000 CSHOQ=2.1290 CSHPRQ=0.0000 EPSFXQ=0.0000 EPSPXQ=0.0000 IBQ=-0.1280 SALEQ=0.0000
+SPIQ=0.0000 PRCCQ=6.8750 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=2000Q1 CURCDQ=USD
+COSTAT=I mcap=14.636875 fqenddt=29FEB2000 TICKER=  medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=0 LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=-0.29 lagshr_p=1.063 lagadj=2
+lageps_d=-0.29 lagshr_d=1.063 lagspiq=0 actual=0 expected=-0.145 deflator=6.875 sue2=2.11%
+_ERROR_=1 _N_=192491
+NOTE: Division by zero detected at line 15 column 148.
+GVKEY=063977 DATADATE=20010228 FYEARQ=2001 FQTR=2 CONML=Return Assured Inc SIC=3571 LIID=01
+LINKDT=19961113 LINKENDDT=20010802 LINKPRIM=C LINKTYPE=LC LPERMCO=15143 LPERMNO=84218
+CONM=RETURN ASSURED INC EXCHG=19 FYR=8 AJEXQ=1.0000 DATAFQTR=2001Q2 RDQ=20010423 ATQ=9.6990
+CSHFDQ=7.7620 CSHOQ=8.5130 CSHPRQ=7.7620 EPSFXQ=-0.1700 EPSPXQ=-0.1700 IBQ=-1.3360 SALEQ=0.0070
+SPIQ=0.0000 PRCCQ=0.5938 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=2001Q1 CURCDQ=USD
+COSTAT=I mcap=5.05459375 fqenddt=28FEB2001 TICKER=  medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=0 LAST.GVKEY=1 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=0 lagshr_p=0 lagadj=1 lageps_d=0
+lagshr_d=0 lagspiq=0 actual=-0.17 expected=0 deflator=0.59375 sue2=(28.6%) _ERROR_=1 _N_=192492
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      353 at 14:80      2486 at 14:96     2495 at 14:101    353 at 14:109     2463 at 14:126
+      4785 at 14:144    4797 at 14:152    2463 at 14:162    385 at 14:205     1494 at 14:221
+      7197 at 14:226    385 at 14:234     4506 at 14:251    5582 at 15:16     13584 at 15:24
+      4506 at 15:34     32493 at 15:76    40919 at 15:92    41160 at 15:97    32493 at 15:105
+      47651 at 15:122   55149 at 15:140   55328 at 15:148   47651 at 15:158   12275 at 17:24
+      55490 at 19:24    726 at 19:34
+NOTE: Mathematical operations could not be performed at the following places. The results of the
+      operations have been set to missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      4 at 15:97    3 at 15:148
+NOTE: There were 248265 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 248265 observations and 48 variables.
+NOTE: At least one W.D format was too small for the number to be printed. The decimal may be
+      shifted by the "BEST" format.
+NOTE: DATA statement used (Total process time):
+      real time           0.21 seconds
+      cpu time            0.18 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL2.
+NOTE: There were 248265 observations read from the data set WORK.QTR.
+NOTE: 248265 observations added.
+NOTE: The data set WORK.COMP_FINAL2 has 495524 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.09 seconds
+      cpu time            0.09 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 248568 observations read from the data set WORK.COMP1.
+      WHERE fqtr=3;
+NOTE: The data set WORK.QTR has 248568 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.31 seconds
+      cpu time            0.21 seconds
+
+
+
+NOTE: Division by zero detected at line 25 column 97.
+GVKEY=010791 DATADATE=19970331 FYEARQ=1997 FQTR=3 CONML=Bulova Technologies Group Inc SIC=4213
+LIID=01 LINKDT=19810130 LINKENDDT=19970730 LINKPRIM=P LINKTYPE=LU LPERMCO=4619 LPERMNO=77703
+CONM=BULOVA TECHNOLOGIES GP INC EXCHG=19 FYR=6 AJEXQ=0.0003 DATAFQTR=1997Q3 RDQ=. ATQ=3.0280
+CSHFDQ=. CSHOQ=10.9150 CSHPRQ=0.0000 EPSFXQ=-310.2100 EPSPXQ=-310.2100 IBQ=-0.0930 SALEQ=5.0620
+SPIQ=0.0000 PRCCQ=0.2190 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1997Q1 CURCDQ=USD
+COSTAT=A mcap=2.3903847817 fqenddt=31MAR1997 TICKER=  medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=0 LAST.GVKEY=1 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=-0.01 lagshr_p=10.96
+lagadj=0.00033333 lageps_d=-0.01 lagshr_d=. lagspiq=0 actual=-930639.3064 expected=-30.0003
+deflator=657.00651007 sue2=(14E4%) _ERROR_=1 _N_=84690
+NOTE: Division by zero detected at line 25 column 97.
+GVKEY=029981 DATADATE=19940331 FYEARQ=1994 FQTR=3 CONML=Perpetual Midwest Financial Inc SIC=6035
+LIID=01 LINKDT=19940331 LINKENDDT=19980529 LINKPRIM=P LINKTYPE=LU LPERMCO=12968 LPERMNO=80354
+CONM=PERPETUAL MIDWEST FINL INC EXCHG=14 FYR=6 AJEXQ=1.0000 DATAFQTR=1994Q3 RDQ=. ATQ=.
+CSHFDQ=0.0000 CSHOQ=0.0000 CSHPRQ=0.0000 EPSFXQ=. EPSPXQ=. IBQ=0.3700 SALEQ=. SPIQ=0.0000
+PRCCQ=11.0000 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1994Q1 CURCDQ=USD COSTAT=I mcap=0
+fqenddt=31MAR1994 TICKER=PMFI medest=. numest=. repdats=. act=. basis=  FIRST.GVKEY=1 LAST.GVKEY=0
+FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=. lagshr_p=. lagadj=. lageps_d=. lagshr_d=. lagspiq=.
+actual=. expected=. deflator=11 sue2=. _ERROR_=1 _N_=172641
+NOTE: Division by zero detected at line 25 column 148.
+GVKEY=029981 DATADATE=19950331 FYEARQ=1995 FQTR=3 CONML=Perpetual Midwest Financial Inc SIC=6035
+LIID=01 LINKDT=19940331 LINKENDDT=19980529 LINKPRIM=P LINKTYPE=LU LPERMCO=12968 LPERMNO=80354
+CONM=PERPETUAL MIDWEST FINL INC EXCHG=14 FYR=6 AJEXQ=1.0000 DATAFQTR=1995Q3 RDQ=19950419
+ATQ=345.3870 CSHFDQ=. CSHOQ=2.1240 CSHPRQ=2.0250 EPSFXQ=0.1800 EPSPXQ=0.1800 IBQ=0.3820
+SALEQ=6.3190 SPIQ=0.0000 PRCCQ=13.7500 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1995Q1
+CURCDQ=USD COSTAT=I mcap=29.205 fqenddt=31MAR1995 TICKER=PMFI medest=. numest=. repdats=. act=.
+basis=  FIRST.GVKEY=0 LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=. lagshr_p=0 lagadj=1
+lageps_d=. lagshr_d=0 lagspiq=0 actual=0.18 expected=. deflator=13.75 sue2=. _ERROR_=1 _N_=172642
+NOTE: Division by zero detected at line 25 column 97.
+GVKEY=063977 DATADATE=20000531 FYEARQ=2000 FQTR=3 CONML=Return Assured Inc SIC=3571 LIID=01
+LINKDT=19961113 LINKENDDT=20010802 LINKPRIM=C LINKTYPE=LC LPERMCO=15143 LPERMNO=84218
+CONM=RETURN ASSURED INC EXCHG=19 FYR=8 AJEXQ=1.0000 DATAFQTR=2000Q3 RDQ=20000718 ATQ=4.8420
+CSHFDQ=0.0000 CSHOQ=2.1370 CSHPRQ=0.0000 EPSFXQ=0.0000 EPSPXQ=0.0000 IBQ=-0.3650 SALEQ=0.0000
+SPIQ=0.0000 PRCCQ=2.4375 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=2000Q2 CURCDQ=USD
+COSTAT=I mcap=5.2089375 fqenddt=31MAY2000 TICKER=  medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=0 LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=-0.04 lagshr_p=2.129 lagadj=1
+lageps_d=-0.04 lagshr_d=2.129 lagspiq=0 actual=0 expected=-0.04 deflator=2.4375 sue2=1.64%
+_ERROR_=1 _N_=192319
+NOTE: Division by zero detected at line 25 column 148.
+GVKEY=063977 DATADATE=20010531 FYEARQ=2001 FQTR=3 CONML=Return Assured Inc SIC=3571 LIID=01
+LINKDT=19961113 LINKENDDT=20010802 LINKPRIM=C LINKTYPE=LC LPERMCO=15143 LPERMNO=84218
+CONM=RETURN ASSURED INC EXCHG=19 FYR=8 AJEXQ=1.0000 DATAFQTR=2001Q3 RDQ=20010721 ATQ=7.9760
+CSHFDQ=8.7220 CSHOQ=13.9750 CSHPRQ=8.7220 EPSFXQ=. EPSPXQ=. IBQ=. SALEQ=. SPIQ=. PRCCQ=0.3700
+CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=2001Q2 CURCDQ=USD COSTAT=I mcap=5.17075
+fqenddt=31MAY2001 TICKER=  medest=. numest=. repdats=. act=. basis=  FIRST.GVKEY=0 LAST.GVKEY=1
+FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=0 lagshr_p=0 lagadj=1 lageps_d=0 lagshr_d=0 lagspiq=0
+actual=. expected=0 deflator=0.37 sue2=. _ERROR_=1 _N_=192320
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      446 at 24:80      2872 at 24:96     2881 at 24:101    446 at 24:109     2675 at 24:126
+      5286 at 24:144    5295 at 24:152    2675 at 24:162    478 at 24:205     1725 at 24:221
+      7593 at 24:226    478 at 24:234     4571 at 24:251    5801 at 25:16     13997 at 25:24
+      4571 at 25:34     35745 at 25:76    44913 at 25:92    45138 at 25:97    35745 at 25:105
+      50537 at 25:122   58513 at 25:140   58689 at 25:148   50537 at 25:158   12761 at 27:24
+      58874 at 29:24    681 at 29:34
+NOTE: Mathematical operations could not be performed at the following places. The results of the
+      operations have been set to missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      3 at 25:97    2 at 25:148
+NOTE: There were 248568 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 248568 observations and 48 variables.
+NOTE: At least one W.D format was too small for the number to be printed. The decimal may be
+      shifted by the "BEST" format.
+NOTE: DATA statement used (Total process time):
+      real time           0.21 seconds
+      cpu time            0.18 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL2.
+NOTE: There were 248568 observations read from the data set WORK.QTR.
+NOTE: 248568 observations added.
+NOTE: The data set WORK.COMP_FINAL2 has 744092 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.09 seconds
+      cpu time            0.11 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 247284 observations read from the data set WORK.COMP1.
+      WHERE fqtr=4;
+NOTE: The data set WORK.QTR has 247284 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.26 seconds
+      cpu time            0.21 seconds
+
+
+
+NOTE: Division by zero detected at line 35 column 97.
+GVKEY=008822 DATADATE=19820930 FYEARQ=1982 FQTR=4 CONML=Pullman Co SIC=3715 LIID=01
+LINKDT=19820218 LINKENDDT=19880915 LINKPRIM=P LINKTYPE=LU LPERMCO=5311 LPERMNO=68654
+CONM=PULLMAN CO-NEW EXCHG=3 FYR=9 AJEXQ=1.0000 DATAFQTR=1982Q4 RDQ=. ATQ=61.0260 CSHFDQ=.
+CSHOQ=8.7060 CSHPRQ=0.0000 EPSFXQ=0.0000 EPSPXQ=0.0000 IBQ=-3.6310 SALEQ=3.6560 SPIQ=0.0000
+PRCCQ=1.8750 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1982Q3 CURCDQ=USD COSTAT=I
+mcap=16.32375 fqenddt=30SEP1982 TICKER=PNW medest=. numest=. repdats=. act=. basis=  FIRST.GVKEY=1
+LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=. lagshr_p=. lagadj=. lageps_d=. lagshr_d=.
+lagspiq=. actual=0 expected=. deflator=1.875 sue2=. _ERROR_=1 _N_=67137
+NOTE: Division by zero detected at line 35 column 148.
+GVKEY=008822 DATADATE=19830930 FYEARQ=1983 FQTR=4 CONML=Pullman Co SIC=3715 LIID=01
+LINKDT=19820218 LINKENDDT=19880915 LINKPRIM=P LINKTYPE=LU LPERMCO=5311 LPERMNO=68654
+CONM=PULLMAN CO-NEW EXCHG=3 FYR=9 AJEXQ=1.0000 DATAFQTR=1983Q4 RDQ=. ATQ=23.2960 CSHFDQ=.
+CSHOQ=8.7480 CSHPRQ=8.7480 EPSFXQ=-0.0700 EPSPXQ=-0.0700 IBQ=0.0000 SALEQ=0.0000 SPIQ=0.0000
+PRCCQ=4.2500 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1983Q3 CURCDQ=USD COSTAT=I
+mcap=37.179 fqenddt=30SEP1983 TICKER=PNW medest=. numest=. repdats=. act=. basis=  FIRST.GVKEY=0
+LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=0 lagshr_p=0 lagadj=1 lageps_d=0 lagshr_d=.
+lagspiq=0 actual=-0.07 expected=0 deflator=4.25 sue2=(1.65%) _ERROR_=1 _N_=67138
+NOTE: Division by zero detected at line 35 column 97.
+GVKEY=029493 DATADATE=19931231 FYEARQ=1993 FQTR=4 CONML=Affiliated Community Bancorp SIC=6035
+LIID=01 LINKDT=19931228 LINKENDDT=19980831 LINKPRIM=P LINKTYPE=LU LPERMCO=12734 LPERMNO=79998
+CONM=AFFILIATED COMMUNITY BANCORP EXCHG=14 FYR=12 AJEXQ=1.2500 DATAFQTR=1993Q4 RDQ=. ATQ=372.1060
+CSHFDQ=0.0000 CSHOQ=2.9070 CSHPRQ=0.0000 EPSFXQ=. EPSPXQ=. IBQ=2.9260 SALEQ=24.4230 SPIQ=0.0000
+PRCCQ=12.0000 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1993Q4 CURCDQ=USD COSTAT=I
+mcap=34.883997907 fqenddt=31DEC1993 TICKER=AFCB medest=. numest=. repdats=. act=. basis=
+FIRST.GVKEY=1 LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=. lagshr_p=. lagadj=. lageps_d=.
+lagshr_d=. lagspiq=. actual=. expected=. deflator=9.599999424 sue2=. _ERROR_=1 _N_=168768
+NOTE: Division by zero detected at line 35 column 148.
+GVKEY=029493 DATADATE=19941231 FYEARQ=1994 FQTR=4 CONML=Affiliated Community Bancorp SIC=6035
+LIID=01 LINKDT=19931228 LINKENDDT=19980831 LINKPRIM=P LINKTYPE=LU LPERMCO=12734 LPERMNO=79998
+CONM=AFFILIATED COMMUNITY BANCORP EXCHG=14 FYR=12 AJEXQ=1.2500 DATAFQTR=1994Q4 RDQ=19950125
+ATQ=399.9370 CSHFDQ=5.3060 CSHOQ=2.9070 CSHPRQ=5.3030 EPSFXQ=1.3200 EPSPXQ=1.3200 IBQ=7.0260
+SALEQ=48.7190 SPIQ=0.0000 PRCCQ=13.1250 CONSOL=C INDFMT=INDL DATAFMT=STD POPSRC=D DATACQTR=1994Q4
+CURCDQ=USD COSTAT=I mcap=38.154371541 fqenddt=31DEC1994 TICKER=AFCB medest=. numest=. repdats=.
+act=. basis=  FIRST.GVKEY=0 LAST.GVKEY=0 FIRST.FYEARQ=1 LAST.FYEARQ=1 lageps_p=. lagshr_p=0
+lagadj=1.25 lageps_d=. lagshr_d=0 lagspiq=0 actual=1.056 expected=. deflator=10.499999048 sue2=.
+_ERROR_=1 _N_=168769
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      270 at 34:80      2806 at 34:96     2824 at 34:101    270 at 34:109     2503 at 34:126
+      5152 at 34:144    5177 at 34:152    2503 at 34:162    349 at 34:205     1554 at 34:221
+      6769 at 34:226    349 at 34:234     3701 at 34:251    4878 at 35:16     12214 at 35:24
+      3701 at 35:34     31702 at 35:76    40201 at 35:92    40532 at 35:97    31702 at 35:105
+      47650 at 35:122   54785 at 35:140   55045 at 35:148   47650 at 35:158   13150 at 37:24
+      54623 at 39:24    752 at 39:34
+NOTE: Mathematical operations could not be performed at the following places. The results of the
+      operations have been set to missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      2 at 35:97    2 at 35:148
+NOTE: There were 247284 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 247284 observations and 48 variables.
+NOTE: At least one W.D format was too small for the number to be printed. The decimal may be
+      shifted by the "BEST" format.
+NOTE: DATA statement used (Total process time):
+      real time           0.18 seconds
+      cpu time            0.18 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL2.
+NOTE: There were 247284 observations read from the data set WORK.QTR.
+NOTE: 247284 observations added.
+NOTE: The data set WORK.COMP_FINAL2 has 991376 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.08 seconds
+      cpu time            0.07 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: There were 991376 observations read from the data set WORK.COMP_FINAL2.
+NOTE: The data set WORK.COMP_FINAL2 has 991376 observations and 48 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.64 seconds
+      cpu time            0.88 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 247259 observations read from the data set WORK.COMP1.
+      WHERE fqtr=1;
+NOTE: The data set WORK.QTR has 247259 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           2.08 seconds
+      cpu time            0.28 seconds
+
+
+
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      146699 at 5:24   44 at 5:34
+NOTE: There were 247259 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 247259 observations and 48 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.12 seconds
+      cpu time            0.12 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL3.
+NOTE: BASE data set does not exist. DATA file is being copied to BASE file.
+NOTE: There were 247259 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.COMP_FINAL3 has 247259 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.08 seconds
+      cpu time            0.09 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 248265 observations read from the data set WORK.COMP1.
+      WHERE fqtr=2;
+NOTE: The data set WORK.QTR has 248265 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.20 seconds
+      cpu time            0.20 seconds
+
+
+
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      149162 at 11:24   42 at 11:34
+NOTE: There were 248265 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 248265 observations and 48 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.12 seconds
+      cpu time            0.12 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL3.
+NOTE: There were 248265 observations read from the data set WORK.QTR.
+NOTE: 248265 observations added.
+NOTE: The data set WORK.COMP_FINAL3 has 495524 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.08 seconds
+      cpu time            0.07 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.00 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 248568 observations read from the data set WORK.COMP1.
+      WHERE fqtr=3;
+NOTE: The data set WORK.QTR has 248568 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.21 seconds
+      cpu time            0.20 seconds
+
+
+
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      148782 at 17:24   51 at 17:34
+NOTE: There were 248568 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 248568 observations and 48 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.12 seconds
+      cpu time            0.09 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL3.
+NOTE: There were 248568 observations read from the data set WORK.QTR.
+NOTE: 248568 observations added.
+NOTE: The data set WORK.COMP_FINAL3 has 744092 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.08 seconds
+      cpu time            0.07 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: Input data set is already sorted; it has been copied to the output data set.
+NOTE: There were 247284 observations read from the data set WORK.COMP1.
+      WHERE fqtr=4;
+NOTE: The data set WORK.QTR has 247284 observations and 44 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.21 seconds
+      cpu time            0.20 seconds
+
+
+
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      161517 at 23:24   38 at 23:34
+NOTE: There were 247284 observations read from the data set WORK.QTR.
+NOTE: The data set WORK.QTR has 247284 observations and 48 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.13 seconds
+      cpu time            0.14 seconds
+
+
+
+NOTE: Appending WORK.QTR to WORK.COMP_FINAL3.
+NOTE: There were 247284 observations read from the data set WORK.QTR.
+NOTE: 247284 observations added.
+NOTE: The data set WORK.COMP_FINAL3 has 991376 observations and 48 variables.
+NOTE: PROCEDURE APPEND used (Total process time):
+      real time           0.30 seconds
+      cpu time            0.09 seconds
+
+
+NOTE: Table WORK.QTR has been dropped.
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.01 seconds
+
+
+
+NOTE: There were 991376 observations read from the data set WORK.COMP_FINAL3.
+NOTE: The data set WORK.COMP_FINAL3 has 991376 observations and 48 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           1.29 seconds
+      cpu time            0.99 seconds
+
+
+260
+261  * Merge all of the results together to get a dataset containing SUE1 , SUE2
+262  * and SUE3 for all relevant (GVKEY-Report date) pairs;
+263  data comp_final;
+264     merge comp_final1 comp_final2 (keep=gvkey fyearq fqtr sue2)
+265     comp_final3 (keep=gvkey fyearq fqtr sue3);
+266     by gvkey fyearq fqtr;
+267     label fqenddt='Calendar date of fiscal period end';
+268     keep ticker ibtic lpermno gvkey conm fyearq fqtr fyr fqenddt repdats rdq;
+269     keep sue1 sue2 sue3 basis actual expected deflator act medest numest prccq mcap;
+270  run;
+
+WARNING: The variable ibtic in the DROP, KEEP, or RENAME list has never been referenced.
+NOTE: MERGE statement has more than one data set with repeats of BY values.
+NOTE: There were 991376 observations read from the data set WORK.COMP_FINAL1.
+NOTE: There were 991376 observations read from the data set WORK.COMP_FINAL2.
+NOTE: There were 991376 observations read from the data set WORK.COMP_FINAL3.
+NOTE: The data set WORK.COMP_FINAL has 991376 observations and 22 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.86 seconds
+      cpu time            0.85 seconds
+
+
+271
+272  proc sort data=comp_final;
+273     *descending sort is intentional to define leads;
+274     by gvkey descending fyearq descending fqtr;
+275  run;
+
+NOTE: There were 991376 observations read from the data set WORK.COMP_FINAL.
+NOTE: The data set WORK.COMP_FINAL has 991376 observations and 22 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.30 seconds
+      cpu time            0.56 seconds
+
+
+276
+277  * Shifting the announcement date to be a trading day;
+278  * Defining the day after the following quarterly earnings announcement as leadrdq1;
+279  * INTNX  function takes a starting date and
+280  returns the date after which a given number of interval boundaries have been crossed. ;
+281  data retdates; set comp_final;
+282     by gvkey;
+283     leadrdq=lag(rdq);
+284     if first.gvkey then leadrdq=intnx('month',rdq,3,'sameday');
+285     *if sunday move back by 2 days, if saturday move back by 1 day;
+286     if weekday(rdq)=1 then rdq1=intnx('day',rdq,-2); else
+287     if weekday(rdq)=7 then rdq1=intnx('day',rdq,-1); else rdq1=rdq;
+288     if weekday(leadrdq)=1 then leadrdq1=intnx('day',leadrdq,2); else
+289     if weekday(leadrdq)=7 then leadrdq1=intnx('day',leadrdq,3); else
+290     if weekday(leadrdq)=6 then leadrdq1=intnx('day',leadrdq,3);else
+291     leadrdq1=intnx('day',leadrdq,1);
+292     if leadrdq=rdq then delete;
+293     keep lpermno gvkey fyearq fqtr rdq1 leadrdq1 rdq;
+294     format rdq1 leadrdq1 date9.;
+295  run;
+
+NOTE: Missing values were generated as a result of performing an operation on missing values.
+      Each place is given by: (Number of times) at (Line):(Column).
+      7531 at 284:32     232294 at 286:7    232294 at 287:7    227133 at 288:7
+      227133 at 289:7    227133 at 290:7    227133 at 291:13
+NOTE: There were 991376 observations read from the data set WORK.COMP_FINAL.
+NOTE: The data set WORK.RETDATES has 774973 observations and 7 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.31 seconds
+      cpu time            0.31 seconds
+
+
+296
+297  * Apply LM filter
+298  * Earnings report dates in Compustat and in IBES (if available)
+299  * should not differ by more than one calendar day;
+300  %let LM_filter=(missing(rdq)=0 and prccq>1 and mcap>5.0);
+301  data comp_final;
+302     set comp_final;
+303     if &LM_filter and (((missing(sue1)=0 or missing(sue2)=0) and missing(repdats)=1)
+304     or (missing(repdats)=0 and abs(intck('day',repdats,rdq))<=1));
+305  run;
+
+NOTE: There were 991376 observations read from the data set WORK.COMP_FINAL.
+NOTE: The data set WORK.COMP_FINAL has 646497 observations and 22 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.22 seconds
+      cpu time            0.23 seconds
+
+
+306
+307  * Extract file of raw daily returns around between earnings announcement dates;
+308  * The INTCK function computes the number of intervals between two dates;
+309  * The INTNX function computes a date after a given number of intervals;
+310  proc sql;
+311     create table crsprets
+312     as select a.*, b.rdq1, b.leadrdq1, b.rdq
+313     from es.crsp (keep=permno ret date where=(&begindate<=date<=&enddate)) as a,
+314     retdates (where=(missing(rdq1)=0 and missing(leadrdq1)=0 and
+315     30<intck('day',rdq1,leadrdq1))) as b
+316     where a.permno=b.lpermno and intnx('day',rdq1,-5)<=a.date<=intnx('day',leadrdq1,5);
+NOTE: Table WORK.CRSPRETS created, with 47326045 rows and 6 columns.
+
+317  quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           4:30.34
+      cpu time            2:06.57
+
+
+318  *remove fully duplicate records;
+319  proc sort data=crsprets noduprec; by _all_;run;
+
+NOTE: There were 47326045 observations read from the data set WORK.CRSPRETS.
+NOTE: 9315 duplicate observations were deleted.
+NOTE: The data set WORK.CRSPRETS has 47316730 observations and 6 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           11.74 seconds
+      cpu time            23.97 seconds
+
+
+320  *To estimate the drift, we compute CAR1 and CAR2;
+321  proc sort data=crsprets out=temp1;
+322     where date lt rdq;
+323     by permno rdq descending date; *descending order is intentional;
+324  run;
+
+NOTE: There were 2027523 observations read from the data set WORK.CRSPRETS.
+      WHERE date<rdq;
+NOTE: The data set WORK.TEMP1 has 2027523 observations and 6 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           2.70 seconds
+      cpu time            2.97 seconds
+
+
+325  data temp1; set temp1;
+326     by permno rdq;
+327     if first.rdq then td_count=0;
+328     td_count=td_count-1; *increments in negative direction;
+329     retain td_count;
+330  run;
+
+NOTE: There were 2027523 observations read from the data set WORK.TEMP1.
+NOTE: The data set WORK.TEMP1 has 2027523 observations and 7 variables.
+NOTE: DATA statement used (Total process time):
+      real time           0.24 seconds
+      cpu time            0.23 seconds
+
+
+331  proc sort data=crsprets out=temp2;
+332     where date ge rdq;
+333     by permno rdq date; *ascending order as default;
+334  run;
+
+NOTE: There were 45289207 observations read from the data set WORK.CRSPRETS.
+      WHERE date>=rdq;
+NOTE: The data set WORK.TEMP2 has 45289207 observations and 6 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           12.80 seconds
+      cpu time            21.12 seconds
+
+
+335  data temp2; set temp2 ;
+336     by permno rdq;
+337     if first.rdq and date=rdq1 then td_count=0;
+338     td_count=td_count+1; *increments in positive direction;
+339     if date=rdq1 then td_count=0;
+340     retain td_count;
+341  run;
+
+NOTE: There were 45289207 observations read from the data set WORK.TEMP2.
+NOTE: The data set WORK.TEMP2 has 45289207 observations and 7 variables.
+NOTE: DATA statement used (Total process time):
+      real time           6.63 seconds
+      cpu time            5.08 seconds
+
+
+342
+343  data crsprets; set temp1 temp2;run;
+
+NOTE: There were 2027523 observations read from the data set WORK.TEMP1.
+NOTE: There were 45289207 observations read from the data set WORK.TEMP2.
+NOTE: The data set WORK.CRSPRETS has 47316730 observations and 7 variables.
+NOTE: DATA statement used (Total process time):
+      real time           6.95 seconds
+      cpu time            4.02 seconds
+
+
+344  proc sort data=crsprets; by permno rdq td_count;run;
+
+NOTE: There were 47316730 observations read from the data set WORK.CRSPRETS.
+NOTE: The data set WORK.CRSPRETS has 47316730 observations and 7 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           17.41 seconds
+      cpu time            19.75 seconds
+
+
+345  proc sql;
+345!           drop table temp1, temp2;
+NOTE: Table WORK.TEMP1 has been dropped.
+NOTE: Table WORK.TEMP2 has been dropped.
+345!                                    quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.01 seconds
+      cpu time            0.00 seconds
+
+
+346
+347  * Calculate cumulative abornal returns:
+348  * PROC MEANS with a NOPRINT option is the same as using PROC SUMMARY.
+349  * a) CAR1 (3-day window);
+350  proc means data=crsprets noprint;
+351     *define the even window and check that the start date is not far from report date;
+352     where -1<=td_count<=1 and intck('day',rdq,date)<=5;
+353     by permno rdq;
+354     var ret;
+355     output out=CAR1 (rename=(_freq_=daysCAR1)) sum=CAR1;
+356  run;
+
+NOTE: There were 1985657 observations read from the data set WORK.CRSPRETS.
+      WHERE (td_count>=-1 and td_count<=1) and (INTCK('day', rdq, date)<=5);
+NOTE: The data set WORK.CAR1 has 664029 observations and 5 variables.
+NOTE: PROCEDURE MEANS used (Total process time):
+      real time           4.65 seconds
+      cpu time            4.57 seconds
+
+
+357
+358  * b) CAR2 (between consequent quarterly earnings announcement dates);
+359  proc means data=crsprets noprint;
+360     where 3<=td_count and date<=leadrdq1;
+361     by permno rdq;
+362     var ret;
+363     output out=CAR2 (rename=(_freq_=daysCAR2)) sum=CAR2;
+364  run;
+
+NOTE: There were 41316132 observations read from the data set WORK.CRSPRETS.
+      WHERE (td_count>=3) and (date<=leadrdq1);
+NOTE: The data set WORK.CAR2 has 667056 observations and 5 variables.
+NOTE: PROCEDURE MEANS used (Total process time):
+      real time           9.65 seconds
+      cpu time            9.64 seconds
+
+
+365
+366
+367  * Merge surprises with abnormal returns and place the final set into home directory;
+368  * Use daysCAR1 and daysCAR2 to check for whether CAR1 and CAR2 are computed over
+369  * potentially misleading time windows due to missing returns data in CRSP DSF file;
+370  proc sql;
+371     create table suecars
+372     as select a.gvkey,a.lpermno label='CRSP PERMNO Identifier',
+373     a.ticker label='Historical IBES Ticker', a.rdq, a.fqenddt, a.fyearq,
+374     a.fqtr, a.sue1 label='Earnings Surprise (Seasonal Random Walk)',
+375     a.sue2 label='Earnings Surprise (Excluding Special items)',
+376     a.sue3 label='Earnings Surprise (Analyst Forecast-based)',
+377     a.numest label='Number of analyst forecasts used in Analyst-based SUE',
+378     b.car1 label='Cumulative AR around EAD (-1,+1)',
+379     b.daysCAR1 label='Actual days used in CAR1 calculation',
+380     c.car2 label='Cumulative AR between Consequent EADs'
+381     from comp_final as a, car1 as b, car2 as c
+382     where a.lpermno=b.permno and a.rdq=b.rdq and a.lpermno=c.permno and a.rdq=c.rdq;
+NOTE: Table WORK.SUECARS created, with 577769 rows and 14 columns.
+
+383  quit;
+NOTE: PROCEDURE SQL used (Total process time):
+      real time           0.60 seconds
+      cpu time            0.59 seconds
+
+
+384
+385  proc sort data=suecars out=es.suecars; by gvkey fyearq fqtr;run;
+
+NOTE: There were 577769 observations read from the data set WORK.SUECARS.
+NOTE: The data set ES.SUECARS has 577769 observations and 14 variables.
+NOTE: PROCEDURE SORT used (Total process time):
+      real time           0.43 seconds
+      cpu time            0.24 seconds
+
+
+
