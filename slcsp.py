@@ -4,9 +4,9 @@ import pandasql as psql
 
 def read_files():
     print("----------Reading the Input Files-------")
-    zips=pd.read_csv(r"C:\Users\ram\slcsp\zips.csv")
-    slcsp=pd.read_csv(r"C:\Users\ram\slcsp\slcsp.csv")
-    plans=pd.read_csv(r"C:\Users\ram\slcsp\plans.csv")
+    zips=pd.read_csv(r"C:\Users\slcsp\zips.csv")
+    slcsp=pd.read_csv(r"C:\Users\slcsp\slcsp.csv")
+    plans=pd.read_csv(r"C:\Users\slcsp\plans.csv")
     return zips, slcsp, plans
 
 
@@ -31,7 +31,7 @@ def process_data(zips,slcsp,plans):
     q="select a.zipcode,b.rate from slcsp a left join zips_final_secondlowest b on a.zipcode=b.zipcode "
     slcsp=psql.sqldf(q,locals())
     print("-----------Exporting the final data to a CSV file---------")
-    slcsp.to_csv(r"C:\Users\ram\slcsp\slcsp_new.csv",index=None, header=True)
+    slcsp.to_csv(r"C:\Users\slcsp\slcsp_new.csv",index=None, header=True)
 
 
 if __name__=="__main__":
